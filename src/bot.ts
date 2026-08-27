@@ -717,11 +717,28 @@ function discoverSkillCommands(): Array<{ command: string; description: string }
       const name = nameMatch[1].trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
       if (!name) continue;
 
-      // Extract description (truncate to 256 chars for Telegram limit)
-      const descMatch = fm.match(/^description:\s*(.+)$/m);
-      const desc = descMatch
-        ? descMatch[1].trim().slice(0, 256)
-        : `Run the ${name} skill`;
+      // Extract description. Handles inline scalars and YAML block scalars
+      // (`description: >` or `|`), where the text sits on the following
+      // indented lines. Truncated to 256 chars for the Telegram limit.
+      const descMatch = fm.match(/^description:\s*(.*)$/m);
+      let raw = '';
+      if (descMatch) {
+        const inline = descMatch[1].trim();
+        if (/^[>|][-+]?$/.test(inline)) {
+          const rest = fm.slice((descMatch.index ?? 0) + descMatch[0].length);
+          const block: string[] = [];
+          for (const line of rest.split('\n').slice(1)) {
+            if (line.trim() === '') continue;
+            if (!/^\s/.test(line)) break;
+            block.push(line.trim());
+          }
+          raw = block.join(' ');
+        } else {
+          raw = inline;
+        }
+      }
+      const desc =
+        raw.replace(/\s+/g, ' ').trim().slice(0, 256) || `Run the ${name} skill`;
 
       commands.push({ command: name, description: desc });
     } catch {
@@ -782,9 +799,36 @@ export function createBot(): Bot {
   ];
   const skillCommands = discoverSkillCommands();
   const allCommands = [...builtInCommands, ...skillCommands].slice(0, 100); // Telegram limit: 100 commands
-  bot.api.setMyCommands(allCommands)
-    .then(() => logger.info({ count: skillCommands.length }, 'Registered %d skill commands with Telegram', skillCommands.length))
-    .catch((err) => logger.warn({ err }, 'Failed to register bot commands with Telegram'));
+
+  // Telegram also caps the total size of the command list, not just the count,
+  // and rejects the entire batch with BOT_COMMANDS_TOO_MUCH when it is over.
+  // Shorten descriptions and retry rather than lose every command to it.
+  const registerCommands = async () => {
+    for (const limit of [256, 160, 96, 64, 32]) {
+      const trimmed = allCommands.map((c) => ({
+        command: c.command,
+        description:
+          c.description.slice(0, limit).trim() || `Run the ${c.command} skill`,
+      }));
+      try {
+        await bot.api.setMyCommands(trimmed);
+        logger.info(
+          { count: skillCommands.length, descriptionLimit: limit },
+          'Registered %d skill commands with Telegram',
+          skillCommands.length,
+        );
+        return;
+      } catch (err) {
+        const desc = String((err as { description?: string })?.description ?? '');
+        if (!desc.includes('BOT_COMMANDS_TOO_MUCH')) {
+          logger.warn({ err }, 'Failed to register bot commands with Telegram');
+          return;
+        }
+      }
+    }
+    logger.warn('Failed to register bot commands: list too large even shortened');
+  };
+  void registerCommands();
 
   // /help — list available commands
   bot.command('help', (ctx) => {

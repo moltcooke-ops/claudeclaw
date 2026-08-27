@@ -6,6 +6,8 @@ dist/
 
 # Environment — never commit API keys
 .env
+.env.*
+!.env.example
 
 # Runtime data — NEVER commit. Contains WhatsApp/Slack messages,
 # session tokens, conversation logs, and database files.

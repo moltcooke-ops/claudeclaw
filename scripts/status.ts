@@ -140,7 +140,7 @@ async function main() {
   // Service status
   if (process.platform === 'darwin') {
     try {
-      const output = execSync('launchctl list com.claudeclaw.app', {
+      const output = execSync('launchctl list com.claudeclaw.main', {
         stdio: 'pipe',
       })
         .toString()
@@ -153,7 +153,7 @@ async function main() {
         let pid = '';
         for (const line of lines) {
           const parts = line.split('\t');
-          if (parts.length >= 3 && parts[2] === 'com.claudeclaw.app') {
+          if (parts.length >= 3 && parts[2] === 'com.claudeclaw.main') {
             pid = parts[0].trim();
             break;
           }

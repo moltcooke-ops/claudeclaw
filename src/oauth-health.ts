@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -28,6 +29,26 @@ function readCredentials(): Credentials | null {
   }
 }
 
+/**
+ * Ask the CLI whether it is signed in. macOS keeps credentials in the login
+ * Keychain rather than .credentials.json, so a missing file is normal there
+ * and must not be reported as a failure. The Keychain is deliberately not read
+ * directly: that triggers an access prompt no background service can answer.
+ * Returns null when the CLI cannot be reached at all.
+ */
+function isLoggedInViaCli(): boolean | null {
+  try {
+    const out = execFileSync('claude', ['auth', 'status', '--json'], {
+      encoding: 'utf-8',
+      timeout: 20_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return (JSON.parse(out) as { loggedIn?: boolean }).loggedIn === true;
+  } catch {
+    return null;
+  }
+}
+
 function getCheckIntervalMs(): number {
   const env = readEnvFile(['OAUTH_CHECK_MINUTES']);
   const minutes = parseInt(env.OAUTH_CHECK_MINUTES || '30', 10);
@@ -52,13 +73,28 @@ async function checkOAuthHealth(sender: Sender): Promise<void> {
   const creds = readCredentials();
 
   if (!creds?.claudeAiOauth?.expiresAt) {
+    // No readable credentials file. On macOS that is the normal case, so
+    // confirm with the CLI before alerting. Expiry timing is unavailable on
+    // this path, meaning an actual logout is caught but not pre-warned.
+    const loggedIn = isLoggedInViaCli();
+    if (loggedIn === true) {
+      if (lastAlertLevel !== 'none') {
+        lastAlertLevel = 'none';
+        logger.info('OAuth healthy again (confirmed by claude auth status)');
+      }
+      logger.debug('No credentials file; CLI reports signed in');
+      return;
+    }
+
     if (lastAlertLevel !== 'expired') {
       lastAlertLevel = 'expired';
+      logger.warn({ loggedIn }, 'OAuth check could not confirm a signed-in CLI');
       await sender(
         '<b>OAuth Health Check</b>\n\n' +
-        'Cannot read OAuth token.\n' +
-        'File missing or invalid structure.\n\n' +
-        'Run: <code>claude auth login</code>',
+        (loggedIn === false
+          ? 'Claude CLI is signed out.\n\nRun: <code>claude auth login</code>'
+          : 'Could not reach the Claude CLI to verify sign-in.\n' +
+            'Check that <code>claude</code> is on the service PATH.'),
       );
     }
     return;
